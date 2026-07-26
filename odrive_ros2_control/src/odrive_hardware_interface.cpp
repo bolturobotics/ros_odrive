@@ -8,6 +8,8 @@
 #include "rclcpp/rclcpp.hpp"
 #include "socket_can.hpp"
 
+#include <cmath>
+
 namespace odrive_ros2_control {
 
 class Axis;
@@ -52,6 +54,8 @@ struct Axis {
     void on_can_msg(const rclcpp::Time& timestamp, const can_frame& frame);
 
     void on_can_msg();
+    bool any_input_enabled() const;
+    void recover_from_overvoltage(const rclcpp::Time& timestamp);
 
     SocketCanIntf* can_intf_;
     uint32_t node_id_;
@@ -63,10 +67,10 @@ struct Axis {
 
     // State (ODrives => ros2_control)
     // rclcpp::Time encoder_estimates_timestamp_;
-    // uint32_t axis_error_ = 0;
-    // uint8_t axis_state_ = 0;
-    // uint8_t procedure_result_ = 0;
-    // uint8_t trajectory_done_flag_ = 0;
+    uint32_t axis_error_ = 0;
+    uint8_t axis_state_ = AXIS_STATE_UNDEFINED;
+    uint8_t procedure_result_ = PROCEDURE_RESULT_SUCCESS;
+    uint8_t trajectory_done_flag_ = 0;
     double pos_estimate_ = NAN; // [rad]
     double vel_estimate_ = NAN; // [rad/s]
     // double iq_setpoint_ = NAN;
@@ -77,8 +81,9 @@ struct Axis {
     // uint32_t disarm_reason_ = 0;
     // double fet_temperature_ = NAN;
     // double motor_temperature_ = NAN;
-    // double bus_voltage_ = NAN;
-    // double bus_current_ = NAN;
+    double bus_voltage_ = NAN;
+    double bus_current_ = NAN;
+    double last_overvoltage_recovery_seconds_ = -1000.0;
 
     // Indicates which controller inputs are enabled. This is configured by the
     // controller that sits on top of this hardware interface. Multiple inputs
@@ -333,7 +338,7 @@ void ODriveHardwareInterface::set_axis_command_mode(const Axis& axis) {
     axis.send(state_msg);
 }
 
-void Axis::on_can_msg(const rclcpp::Time&, const can_frame& frame) {
+void Axis::on_can_msg(const rclcpp::Time& timestamp, const can_frame& frame) {
     uint8_t cmd = frame.can_id & 0x1f;
 
     auto try_decode = [&]<typename TMsg>(TMsg& msg) {
@@ -346,6 +351,18 @@ void Axis::on_can_msg(const rclcpp::Time&, const can_frame& frame) {
     };
 
     switch (cmd) {
+        case Heartbeat_msg_t::cmd_id: {
+            if (Heartbeat_msg_t msg; try_decode(msg)) {
+                axis_error_ = msg.Axis_Error;
+                axis_state_ = msg.Axis_State;
+                procedure_result_ = msg.Procedure_Result;
+                trajectory_done_flag_ = msg.Trajectory_Done_Flag;
+
+                if ((axis_error_ & ODRIVE_ERROR_DC_BUS_OVER_VOLTAGE) != 0 && any_input_enabled()) {
+                    recover_from_overvoltage(timestamp);
+                }
+            }
+        } break;
         case Get_Encoder_Estimates_msg_t::cmd_id: {
             if (Get_Encoder_Estimates_msg_t msg; try_decode(msg)) {
                 pos_estimate_ = msg.Pos_Estimate * (2 * M_PI);
@@ -358,8 +375,44 @@ void Axis::on_can_msg(const rclcpp::Time&, const can_frame& frame) {
                 torque_estimate_ = msg.Torque_Estimate;
             }
         } break;
+        case Get_Bus_Voltage_Current_msg_t::cmd_id: {
+            if (Get_Bus_Voltage_Current_msg_t msg; try_decode(msg)) {
+                bus_voltage_ = msg.Bus_Voltage;
+                bus_current_ = msg.Bus_Current;
+            }
+        } break;
             // silently ignore unimplemented command IDs
     }
+}
+
+bool Axis::any_input_enabled() const {
+    return pos_input_enabled_ || vel_input_enabled_ || torque_input_enabled_;
+}
+
+void Axis::recover_from_overvoltage(const rclcpp::Time& timestamp) {
+    const double now_seconds = timestamp.seconds();
+    if (std::isfinite(now_seconds) && now_seconds - last_overvoltage_recovery_seconds_ < 2.0) {
+        return;
+    }
+    last_overvoltage_recovery_seconds_ = now_seconds;
+
+    RCLCPP_WARN(
+        rclcpp::get_logger("ODriveHardwareInterface"),
+        "ODrive node %u reported DC bus over-voltage (axis_error=0x%08x, state=%u, procedure_result=%u, bus_voltage=%.2f V). Clearing errors and requesting closed-loop control.",
+        node_id_,
+        axis_error_,
+        axis_state_,
+        procedure_result_,
+        bus_voltage_
+    );
+
+    Clear_Errors_msg_t clear_msg;
+    clear_msg.Identify = 0;
+    send(clear_msg);
+
+    Set_Axis_State_msg_t state_msg;
+    state_msg.Axis_Requested_State = AXIS_STATE_CLOSED_LOOP_CONTROL;
+    send(state_msg);
 }
 
 PLUGINLIB_EXPORT_CLASS(odrive_ros2_control::ODriveHardwareInterface, hardware_interface::SystemInterface)
