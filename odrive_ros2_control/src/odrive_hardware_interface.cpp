@@ -55,7 +55,7 @@ struct Axis {
 
     void on_can_msg();
     bool any_input_enabled() const;
-    void recover_from_overvoltage(const rclcpp::Time& timestamp);
+    void recover_from_bus_voltage_fault(const rclcpp::Time& timestamp);
 
     SocketCanIntf* can_intf_;
     uint32_t node_id_;
@@ -83,7 +83,7 @@ struct Axis {
     // double motor_temperature_ = NAN;
     double bus_voltage_ = NAN;
     double bus_current_ = NAN;
-    double last_overvoltage_recovery_seconds_ = -1000.0;
+    double last_bus_voltage_fault_recovery_seconds_ = -1000.0;
 
     // Indicates which controller inputs are enabled. This is configured by the
     // controller that sits on top of this hardware interface. Multiple inputs
@@ -358,8 +358,8 @@ void Axis::on_can_msg(const rclcpp::Time& timestamp, const can_frame& frame) {
                 procedure_result_ = msg.Procedure_Result;
                 trajectory_done_flag_ = msg.Trajectory_Done_Flag;
 
-                if ((axis_error_ & ODRIVE_ERROR_DC_BUS_OVER_VOLTAGE) != 0 && any_input_enabled()) {
-                    recover_from_overvoltage(timestamp);
+                if ((axis_error_ & (ODRIVE_ERROR_DC_BUS_OVER_VOLTAGE | ODRIVE_ERROR_DC_BUS_UNDER_VOLTAGE)) != 0 && any_input_enabled()) {
+                    recover_from_bus_voltage_fault(timestamp);
                 }
             }
         } break;
@@ -389,17 +389,22 @@ bool Axis::any_input_enabled() const {
     return pos_input_enabled_ || vel_input_enabled_ || torque_input_enabled_;
 }
 
-void Axis::recover_from_overvoltage(const rclcpp::Time& timestamp) {
+void Axis::recover_from_bus_voltage_fault(const rclcpp::Time& timestamp) {
     const double now_seconds = timestamp.seconds();
-    if (std::isfinite(now_seconds) && now_seconds - last_overvoltage_recovery_seconds_ < 2.0) {
+    if (std::isfinite(now_seconds) && now_seconds - last_bus_voltage_fault_recovery_seconds_ < 2.0) {
         return;
     }
-    last_overvoltage_recovery_seconds_ = now_seconds;
+    last_bus_voltage_fault_recovery_seconds_ = now_seconds;
+
+    const bool over_voltage = (axis_error_ & ODRIVE_ERROR_DC_BUS_OVER_VOLTAGE) != 0;
+    const bool under_voltage = (axis_error_ & ODRIVE_ERROR_DC_BUS_UNDER_VOLTAGE) != 0;
 
     RCLCPP_WARN(
         rclcpp::get_logger("ODriveHardwareInterface"),
-        "ODrive node %u reported DC bus over-voltage (axis_error=0x%08x, state=%u, procedure_result=%u, bus_voltage=%.2f V). Clearing errors and requesting closed-loop control.",
+        "ODrive node %u reported DC bus voltage fault%s%s (axis_error=0x%08x, state=%u, procedure_result=%u, bus_voltage=%.2f V). Clearing errors and requesting closed-loop control.",
         node_id_,
+        over_voltage ? " over-voltage" : "",
+        under_voltage ? " under-voltage" : "",
         axis_error_,
         axis_state_,
         procedure_result_,
