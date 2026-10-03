@@ -13,7 +13,8 @@ botwheel_explorer:
     left_wheel_names: ["left_wheel_joint"]
     right_wheel_names: ["right_wheel_joint"]
 
-    wheel_separation: 0.419
+    # Tyre centre to centre: 479 mm in ODrive's CAD, 48 cm by tape (was 0.419 from the demo)
+    wheel_separation: 0.479
     wheel_radius: 0.0855
 
     wheel_separation_multiplier: 1.0

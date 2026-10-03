@@ -24,7 +24,15 @@ from launch_ros.substitutions import FindPackageShare
 
 def generate_launch_description():
     # Declare arguments
-    declared_arguments = []
+    declared_arguments = [
+        # Robot description xacro; defaults to this package's demo description
+        DeclareLaunchArgument(
+            "description_file",
+            default_value=PathJoinSubstitution(
+                [FindPackageShare("odrive_botwheel_explorer"), "urdf", "diffbot.urdf.xacro"]
+            ),
+        ),
+    ]
 #    declared_arguments.append(
 #        DeclareLaunchArgument(
 #            "gui",
@@ -49,9 +57,7 @@ def generate_launch_description():
         [
             PathJoinSubstitution([FindExecutable(name="xacro")]),
             " ",
-            PathJoinSubstitution(
-                [FindPackageShare("odrive_botwheel_explorer"), "urdf", "diffbot.urdf.xacro"]
-            ),
+            LaunchConfiguration("description_file"),
 #            " ",
 #            "use_mock_hardware:=",
 #            use_mock_hardware,
